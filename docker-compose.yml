@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: invoices_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6378:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mock-erp:
+    build:
+      context: ./harness
+    environment:
+      ERP_SEED: "42"
+      ERP_RATE_LIMIT: "10"
+      ERP_PO_COUNT: "33333"
+      ERP_CHAOS: "1"
+    ports:
+      - "9100:9100"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9100/healthz')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  django-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A config worker -l info --concurrency=5
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+      django-api:
+        condition: service_started
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A config beat -l info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+      django-api:
+        condition: service_started
+
+volumes:
+  postgres_data:
